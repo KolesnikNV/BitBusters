@@ -1,7 +1,7 @@
 from diagrams import Cluster, Diagram
 from diagrams.programming.language import Python
 
-with Diagram("Async Parser Flow", show=False):
+with Diagram("diagram", show=False):
     with Cluster("Async Functions"):
         fetch = Python("fetch")
         parse_products = Python("parse_products")
