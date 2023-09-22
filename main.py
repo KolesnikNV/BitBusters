@@ -1,150 +1,215 @@
-import os
 import asyncio
+import os
 
-import pandas as pd
-import aiohttp
-import ssl
+import httpx
+import openpyxl
+from halo import Halo
+from tqdm import tqdm
 
-sslcontext = ssl.create_default_context()
-sslcontext.check_hostname = False
-sslcontext.verify_mode = ssl.CERT_NONE
-BASE_URL = "https://jewelers.services/productcore/api/"
-BASE_MEDIA_URL = "https://images.jewelers.services"
-
-CATEGORIES = ("Jewelry-Rings-2·Stone-Rings", "Jewelry-Rings-Adjustable")
-HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
-}
+from core.settings import (
+    Jewelry_Rings_Adjustable_fetch_params,
+    Jewelry_Rings_Adjustable_fetch_url,
+    Jewelry_Rings_Two_Stone_Rings_fetch_params,
+    Jewelry_Rings_Two_Stone_Rings_fetch_url,
+    params_request,
+)
 
 
-async def get_urls(session, url, headers, category):
+async def fetch(url: str, params: dict[str, any]) -> httpx.Response:
     """
-    Возвращает список эндпоинтов каждого товара на странице.
+    Выполняет асинхронный HTTP-запрос на указанный URL с заданными параметрами.
     """
-    body = {
-        "filters": [{"key": "ItemsPerPage", "value": "36"}],
-        "page": 1,
-        "sortCode": 28420,
-        "path": f"{category}",
-    }
-    async with session.post(url, headers=headers, json=body) as response:
-        src = await response.json()
+    headers = params["headers"]
+    body = params["body"]
+    async with httpx.AsyncClient() as client:
+        if params["method"] != "POST":
+            return await client.get(url, headers=headers)
+        return await client.post(url, headers=headers, data=body)
+
+
+def parse_products(data: list[dict[str, any]]) -> list[str]:
+    """
+    Извлекает URL-адреса продуктов со страницы с товарами.
+    """
+    urls = []
+    for product in data:
+        url_description = product["URLDescription"]
+        style = product["Style"]
+        url = f"https://jewelers.services/productcore/api/pd/{url_description}/{style}"
+        urls.append(url)
+    return urls
+
+
+def process_file_name(url: str) -> str:
+    """
+    Генерирует имя файла на основе URL-адреса.
+    """
+    file_name = os.path.basename(url)
+    file_name = file_name.replace("?", "").replace("/", "_")
+    file_name = file_name.split("=")[0] + ".xlsx"
+    return file_name
+
+
+async def fetch_product_data(url: str) -> dict:
+    """
+    Получает данные о продукте по URL.
+    """
+    response = await fetch(url, params_request)
+    return {} if response.status_code != 200 else response.json()
+
+
+def extract_specification_values(specifications: list[dict]) -> str:
+    """
+    Извлекает строку со спецификациями продукта из данных о продукте.
+    """
+    specification_values = []
+    for spec in specifications:
+        spec_name = spec.get("Specification")
+        spec_value = spec.get("Value")
+        specification_values.append(f"{spec_name}: {spec_value}")
+    return "; ".join(specification_values)
+
+
+def extract_image_urls(images: list[dict]) -> str:
+    """
+    Извлекает строку с URL-адресами изображений из данных о продукте.
+    """
+    image_names = [image.get("FileName") for image in images]
+    image_urls = [
+        f"https://images.jewelers.services/qgrepo/{image_name}"
+        for image_name in image_names
+    ]
+    return "; ".join(image_urls)
+
+
+def extract_video_url(video: dict) -> str:
+    """
+    Извлекает URL-адрес видео из данных о продукте.
+    """
+    video_filename = video.get("FileName") if video else "None"
+    return (
+        f"https://images.jewelers.services/0/Videos/{video_filename}"
+        if video
+        else "None"
+    )
+
+
+def extract_size_price(sizes: list[dict], product_data: dict) -> str:
+    """
+    Извлекает строку с размерами и ценами из данных о продукте.
+    """
+    if not sizes:
+        return product_data.get("Product", {}).get("MSRP")
+    size_price_list = [
+        f"{size_data.get('Size')} - {size_data.get('MSRP')}" for size_data in sizes
+    ]
+    return "; ".join(size_price_list)
+
+
+def extract_product_attributes(product_data: dict) -> list:
+    """
+    Извлекает атрибуты продукта из данных о продукте.
+    """
+    description = product_data.get("Product", {}).get("Description")
+    sizes = product_data.get("Sizes")
+    specifications = product_data.get("Specifications")
+    images = product_data.get("Images")
+    video = product_data.get("Video")
+    availability = product_data.get("Product", {}).get("AvailabilityText")
+
+    spec_string = extract_specification_values(specifications)
+    image_string = extract_image_urls(images)
+    video_url = extract_video_url(video)
+    size_price_string = extract_size_price(sizes, product_data)
 
     return [
-        f"{BASE_URL}pd/{item.get('URLDescription')}/{item.get('Style')}"
-        for item in src["IndexedProducts"]["Results"]
+        description,
+        size_price_string,
+        spec_string,
+        image_string,
+        video_url,
+        availability,
     ]
 
 
-async def get_data(session, url, headers):
-    """Получает и возвращает данные по указанному URL-адресу в формате JSON"""
-    try:
-        async with session.get(url, headers=headers, ssl=False, timeout=30) as response:
-            response.raise_for_status()
-            return await response.json()
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        print(f"Не удалось получить данные по адресу {url}: {str(e)}")
-        return None
-
-
-async def get_specification(session, url, headers, category):
+async def fetch_urls(urls: list[str]) -> list[list[str]]:
     """
-    Получает необходимые данные для каждого товара по его URL, компонует все
-    данные в список
+    Получает данные для каждого URL-адреса продукта асинхронно.
     """
-    products_data = []
-    urls = await get_urls(session, url, headers, category)
-    for item_url in urls:
-        print(f"Получение данных по адресу: {item_url}")
-        data = await get_data(session, item_url, headers)
-        if data:
-            description = {}
-            product = data.get("Product")
-            if product:
-                description["Product"] = product["Style"]
-                description["CountryOfOrigin"] = product["CountryOfOrigin"]
-                description["Product availability"] = (
-                    "In Stock" if product["InStock"] > 0 else "Out of Stock"
-                )
-            specifications = data.get("Specifications")
-            if specifications:
-                description.update(
-                    {
-                        spec_item["Specification"]: spec_item["Value"]
-                        for spec_item in specifications
-                    }
-                )
-            sizes = data.get("Sizes")
-            if sizes:
-                description["Price_on_size"] = [
-                    {"size": size["Size"], "MSRP": size["MSRP"]} for size in sizes
-                ]
-            images = data.get("Images")
-            if images:
-                description["Images"] = {
-                    f"{BASE_MEDIA_URL}/qgrepo/{img.get('FileName')}" for img in images
-                }
-            video = data.get("Video")
-            if video:
-                description["Video"] = f"{BASE_MEDIA_URL}/0/Videos/{video['FileName']}"
-            products_data.append(description)
-    return products_data
+    data_list = []
+    for url in urls:
+        product_data = await fetch_product_data(url)
+        if product_data:
+            attributes = extract_product_attributes(product_data)
+            data_list.append(attributes)
+    return data_list
 
 
-async def save_in_excel(data, category):
-    """Создание файла .xlsx и заполнение его данными"""
-    df = pd.DataFrame(data)
-    directory = "./output"
-    if not os.path.exists(directory):
-        os.makedirs(directory, exist_ok=True)
-    file_path = os.path.join(directory, f"{category}.xlsx")
-    try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, df.to_excel, file_path)
-    except Exception as e:
-        print(f"Не удалось сохранить данные в файл {file_path}: {str(e)}")
-
-
-async def parse_category(session, url, category):
+async def create_excel(file_name: str, data: list[list[str]]) -> None:
     """
-    Выполняет парсинг товаров из указанной категории.
-
+    Создает новый файл Excel и сохраняет данные в него.
     """
-    data = await get_specification(session, url, HEADERS, category)
-    if data:
-        await save_in_excel(data, category)
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(
+        ["Name", "Size - Price", "Specifications", "Images", "Video", "Availability"]
+    )
+    for row in data:
+        worksheet.append(row)
+    workbook.save(file_name)
+
+
+jewelry_rings_adjustable_fetch = fetch(
+    Jewelry_Rings_Adjustable_fetch_url, Jewelry_Rings_Adjustable_fetch_params
+)
+
+jewelry_rings_two_stone_rings_fetch = fetch(
+    str(Jewelry_Rings_Two_Stone_Rings_fetch_url),
+    Jewelry_Rings_Two_Stone_Rings_fetch_params,
+)
+
+
+async def process_data_async(fetch: httpx.Response) -> list[str]:
+    """
+    Обрабатывает данные о продуктах и сохраняет их в файл Excel.
+    """
+    response = await fetch
+    result = response.json()
+    if indexed_products := result.get("IndexedProducts"):
+        if results := indexed_products.get("Results"):
+            urls = parse_products(results)
+            file_name = process_file_name(str(response.url))
+            await create_excel(file_name, await fetch_urls(urls))
+            return urls
+        else:
+            print("Нет данных о продуктах")
+    else:
+        print("Нет данных в IndexedProducts")
 
 
 async def main():
-    """
-    Главная функция, запускает парсинг двух категорий параллельно.
-    """
-    async with aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(ssl=sslcontext)
-    ) as session:
-        tasks = []
-        for category in CATEGORIES:
-            url = BASE_URL + f"pl/{category}"
-            task = asyncio.create_task(parse_category(session, url, category))
-            tasks.append(task)
-
-        await asyncio.gather(*tasks)
-
-
-async def cyclic_parse():
-    """Выполнение парсинга с заданной в минутах периодичностью"""
-    interval = int(input("Введите периодичность парсинга в минутах: "))
     while True:
-        print("Начало парсинга")
-        await main()
-        print("Данные сохранены. Ожидание следующего цикла")
-        await asyncio.sleep(interval * 60)
+        times = int(
+            input(
+                "\nРаз в какое время вы хотите парсить данные? Введите время в минутах: "
+            )
+        )
+        futures = []
+        futures.append(process_data_async(jewelry_rings_adjustable_fetch))
+        futures.append(process_data_async(jewelry_rings_two_stone_rings_fetch))
+
+        with tqdm(total=len(futures), desc="\nПарсинг") as pbar:
+            for completed_future in asyncio.as_completed(futures):
+                await completed_future
+                pbar.update(1)
+        spinner = Halo(text="Ожидание следующего цикла...", spinner="dots")
+        spinner.start()
+        await asyncio.sleep(times * 60)
+        spinner.stop()
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(cyclic_parse())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        print("\nВы решили не дожидаться следующего цикла парсинга, печально :(")
