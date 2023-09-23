@@ -101,7 +101,8 @@ def extract_size_price(sizes: list[dict], product_data: dict) -> str:
     if not sizes:
         return product_data.get("Product", {}).get("MSRP")
     size_price_list = [
-        f"{size_data.get('Size')} - {size_data.get('MSRP')}" for size_data in sizes
+        f"{size_data.get('Size')} - {size_data.get('MSRP')}"
+        for size_data in sizes
     ]
     return "; ".join(size_price_list)
 
@@ -152,7 +153,14 @@ async def create_excel(file_name: str, data: list[list[str]]) -> None:
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
     worksheet.append(
-        ["Name", "Size - Price", "Specifications", "Images", "Video", "Availability"]
+        [
+            "Name",
+            "Size - Price",
+            "Specifications",
+            "Images",
+            "Video",
+            "Availability",
+        ]
     )
     for row in data:
         worksheet.append(row)
@@ -212,4 +220,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nВы решили не дожидаться следующего цикла парсинга, печально :(")
+        print(
+            "\nВы решили не дожидаться следующего цикла парсинга, печально :("
+        )
